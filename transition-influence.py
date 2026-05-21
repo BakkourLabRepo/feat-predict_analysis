@@ -1,6 +1,8 @@
 import pymc as pm
 import numpy as np
 import pandas as pd
+from scipy.sparse.csgraph import shortest_path
+
 import argparse
 import ast
 import pickle
@@ -8,30 +10,8 @@ import re
 from concurrent.futures import ProcessPoolExecutor
 from os import listdir, makedirs
 
+from src.utils import import_config
 
-
-PROJECT_PATH = ''
-DATA_PATH = f'{PROJECT_PATH}/data'
-RESULTS_PATH = f'{PROJECT_PATH}/results'
-SUCCESSOR_FEATURE_RECODING = [
-    [0,1,2,3],
-    [2,3,0,1]
-]
-OVERWRITE = True
-RUN_TEST_ANALYSIS = True
-SAVE_RESIDUALS = False
-
-# Variable to group data further by within group_label
-# If model_type == 'trial', var should be associated with the trial ID
-# If model_type == 'agent', var should be associated with the agent ID
-GROUPING_VAR = False
-
-# Select specific project subgroups to run
-GROUP_LABELS = [
-]
-
-# Number of Bambi cores to use
-N_CORES = 4
 
 def get_worker_assignments(n_cores, n_chains=4):
     """
@@ -201,7 +181,7 @@ def get_possible_compositions(options, unpack_features=False):
 def recode_for_task_based_features(conj, feature_tmat):
     """
     Recode a feature array so that features are defined according to
-    true transitions. I.e., if the feature transition matrix is not
+    causal transitions. I.e., if the feature transition matrix is not
     the identity matrix (between-feature transitions condition), with
     the re-defined feature array, the feature transition matrix will
     now be the identity matrix
@@ -223,8 +203,28 @@ def recode_for_task_based_features(conj, feature_tmat):
     conj = inst*feature_tmat[feat]
     return conj
 
+def get_successor(state, feature_tmat, instance_tmat, n_steps=1):
+    for _ in range(n_steps):
+        succ = np.zeros_like(state, dtype=int)
+        for feat in range(len(state)):
+            if state[feat] != 0:
+                inst = state[feat] - 1
+                feat_new = np.random.choice(
+                    np.arange(len(feature_tmat)),
+                    p = feature_tmat[feat]
+                    )
+                succ[feat_new] = np.random.choice(
+                    np.arange(len(instance_tmat)) + 1,
+                    p = instance_tmat[inst]
+                    )
+        state = succ
+    return succ
 
-def get_trial_wise_target_predictions(df, successor_feature_recoding):
+def get_trial_wise_target_predictions(
+        df,
+        instance_tmat,
+        feature_tmat
+        ):
     """
     Get trial-wise target predictions for each possible composition
 
@@ -232,9 +232,10 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
     ---------
     df : pandas.DataFrame
         Data frame of training data
-    successor_feature_recoding : list
-        List of indices to recode successor features (based on
-        between-feature transition structure by condition)
+    instance_tmat : numpy.Array
+        Transition matrix for instance values
+    feature_tmat : numpy.Array
+        Transition matrix for features
     
     Returns
     -------
@@ -250,7 +251,12 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
     if 'valid_response' in df.columns:
         df = df.loc[df['valid_response'] == 1]
         df = df.reset_index(drop=True)
-            
+
+    # Compute shortest paths to identify inference step
+    shortest_paths = shortest_path(instance_tmat, directed=True)
+    shortest_paths[shortest_paths == np.inf] = 0
+    max_step = int(np.max(shortest_paths))
+
     # Get trial-wise target predictions for each possible composition
     composition_counts = {}
     composition_successor_counts = {}
@@ -263,14 +269,8 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
         
         # Unpack composition, successor, and target features
         comp_features = unpack_feature_arrays(df.iloc[t]['composition'])
-        succ_features = unpack_feature_arrays(
-            df.iloc[t]['successor'],
-            feature_recoding_index = successor_feature_recoding
-        )
-        target_features = unpack_feature_arrays(
-            df.iloc[t]['target'],
-            feature_recoding_index = successor_feature_recoding
-        )
+        succ_features = unpack_feature_arrays(df.iloc[t]['successor'])
+        target_features = unpack_feature_arrays(df.iloc[t]['target'])
         
         # Get set of possible pairs of features for the composition
         options = df.iloc[t]['options']
@@ -281,27 +281,20 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
         action = np.all(np.all(comp_features == actions, axis=2), axis=1)
         action = np.where(action)[0][0]
 
+        # Get inference step
+        example_inst = options[0][0]
+        example_inst = example_inst[example_inst != 0][0] - 1
+        step = int(max_step - np.max(shortest_paths[example_inst]) + 1)
+
         # For each composition compute target prediction
         target_predictions = []
         for act_features in actions:
             
             # Predict each target feature separately for
-            # [incidental, true] transitions
+            # [spurious, causal] transitions
             pred = [0, 0]
             for target_f in target_features:
-                
-
-                ######### DO OUTSIDE OF THIS FUNCTION (ASSUME TRUE TRANSITIONS ARE WITHIN FEATURE)
-                # Re-code features so that true transitions are
-                # within column
-                #target_f = recode_for_task_based_features(
-                #    target_f,
-                #    feature_tmat
-                #)
                 target_f_key = tuple(target_f)
-
-                #true_found = False
-                #incidental_found = False
                 for act_f in act_features:
                     act_f_key = tuple(act_f)
 
@@ -309,32 +302,20 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
                     if not act_f_key in last_edges.keys():
                         continue
 
-                    # Is this a true or incidental transition?
-                    true_edge = int(np.all(
-                        target_f.astype(bool) == act_f.astype(bool)
-                    ))
-
-                    """
-                    # Only add to count if edge has not been found for this target_f
-                    if (
-                        (true_found and true_edge) or
-                        (incidental_found and not true_edge)
-                    ):
-                        continue
-                    """
+                    # Is this a causal or spurious transition?
+                    act_f_succ = get_successor(
+                        act_f,
+                        feature_tmat[step - 1],
+                        instance_tmat
+                        )
+                    is_causal = int(np.all(act_f_succ == target_f))
 
                     # If edge was observed recently, add to count
                     found = target_f_key in last_edges[act_f_key]
-                    pred[true_edge] += found
-                    """
-                    if found:
-                        if true_edge:
-                            true_found = True
-                        else:
-                            incidental_found = True
-                    """
+                    pred[is_causal] += found
 
-            # Average over edge-level predictions for true vs incidental predictions
+
+            # Average over edge-level predictions for causal vs spurious predictions
             target_predictions.append(np.array(pred)/len(target_features))
 
         # Make target predictions relative to action 1
@@ -344,7 +325,7 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
         # Skip trials with no target predictions (e.g. on first trial of block)
         if np.any(target_predictions):
             
-            # Store incidental and true evidence for actions
+            # Store spurious and causal evidence for actions
             comp_action_evidence_incidental.append(target_predictions[:, 0])
             comp_action_evidence_true.append(target_predictions[:, 1])
 
@@ -356,13 +337,6 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
         # transitions to the successors' features
         succ_keys = []
         for f_succ in succ_features:
-            ######### DO OUTSIDE OF THIS FUNCTION (ASSUME TRUE TRANSITIONS ARE WITHIN FEATURE)
-            # Re-code features so that true transitions are
-            # within column
-            #f_succ = recode_for_task_based_features(
-            #    f_succ,
-            #    feature_tmat
-            #)
             succ_keys.append(tuple(f_succ))
         for act_f in comp_features:
 
@@ -410,7 +384,8 @@ def get_trial_wise_target_predictions(df, successor_feature_recoding):
 def get_trial_wise_target_predictions_test(
         test_df,
         transition_props,
-        successor_feature_recoding
+        instance_tmat,
+        feature_tmat
     ):
     """
     Get trial-wise target predictions for each possible composition
@@ -422,9 +397,11 @@ def get_trial_wise_target_predictions_test(
         Data frame of test data
     transition_props : dict
         Dictionary of composition-successor training transition rates
-    successor_feature_recoding : list
-        List of indices to recode successor features (based on
-        between-feature transition structure by condition)
+    instance_tmat : numpy.Array
+        Transition matrix for instance values
+    feature_tmat : numpy.Array
+        Transition matrix for features
+    
     
     Returns
     -------
@@ -439,6 +416,11 @@ def get_trial_wise_target_predictions_test(
     if 'valid_response' in test_df.columns:
         test_df = test_df.loc[test_df['valid_response'] == 1]
         test_df = test_df.reset_index(drop=True)
+
+    # Compute shortest paths to identify inference step
+    shortest_paths = shortest_path(instance_tmat, directed=True)
+    shortest_paths[shortest_paths == np.inf] = 0
+    max_step = int(np.max(shortest_paths))
             
     # Get trial-wise composition prediction
     comp_action_evidence_incidental = []
@@ -447,13 +429,9 @@ def get_trial_wise_target_predictions_test(
     trials = []
     for t in range(len(test_df)):
         
-        
         # Skip trials with no valid response
         comp_features = unpack_feature_arrays(test_df.iloc[t]['composition'])
-        target_features = unpack_feature_arrays(
-            test_df.iloc[t]['target'],
-            feature_recoding_index = successor_feature_recoding
-        )
+        target_features = unpack_feature_arrays(test_df.iloc[t]['target'])
 
         # Get set of possible compositions
         options = test_df.iloc[t]['options']
@@ -463,40 +441,58 @@ def get_trial_wise_target_predictions_test(
         # Get composition index in possible compositions set
         action = np.all(np.all(comp_features == actions, axis=2), axis=1)
         action = np.where(action)[0][0]
-        
+
+        # Get inference step
+        example_inst = options[0][0]
+        example_inst = example_inst[example_inst != 0][0] - 1
+        step = int(max_step - np.max(shortest_paths[example_inst]) + 1)
+
+        # Number of steps inferred over
+        if 'n_steps' in test_df.columns:
+            n_steps = test_df.iloc[t]['n_steps']
+        else:
+            n_steps = 1
+
         # For each composition, compute target predictions based on
         # average training transitions
         target_predictions = []
         for act_features in actions:
 
             # Predict each target feature separately for
-            # [incidental, true] transitions
+            # [spurious, causal] transitions
             pred = [0, 0]
             for target_f in target_features:
-                
-                ######### DO OUTSIDE OF THIS FUNCTION (ASSUME TRUE TRANSITIONS ARE WITHIN FEATURE)
-                # Re-code features so that "true" transitions are
-                # within column
-                #target_f = recode_for_task_based_features(
-                #    target_f,
-                #    feature_tmat
-                #)
                 target_f_key = tuple(target_f)
 
                 for act_f in act_features:
-                    act_f_key = tuple(act_f)
+                    
+                    # Get successor feature to make 1-step analysis
+                    if n_steps > 1:
+                        act_f = get_successor(
+                            act_f,
+                            feature_tmat[step - 1],
+                            instance_tmat,
+                            n_steps = n_steps - 1
+                            )
 
+                    act_f_key = tuple(act_f)
+                
                     # Feature not seen yet
                     if not act_f_key in transition_props.keys():
                         continue
                     if not target_f_key in transition_props[act_f_key].keys():
                         continue
 
-                    # Is this a true or incidental transition edge?
-                    true_edge = int(np.all(target_f.astype(bool) == act_f.astype(bool)))
-                    pred[true_edge] += transition_props[act_f_key][target_f_key]
+                    # Is this a causal or spurious transition?
+                    act_f_succ = get_successor(
+                        act_f,
+                        feature_tmat[step - 1],
+                        instance_tmat
+                        )
+                    is_causal = int(np.all(act_f_succ == target_f))
+                    pred[is_causal] += transition_props[act_f_key][target_f_key]
 
-            # Average over edge-level predictions for true vs incidental predictions
+            # Average over edge-level predictions for causal vs spurious predictions
             target_predictions.append(np.array(pred)/len(target_features))
 
         # Make target predictions for each action relative to action 1
@@ -506,7 +502,7 @@ def get_trial_wise_target_predictions_test(
         # Skip trials with no target predictions (e.g. on first trial of block)
         if np.any(target_predictions):
             
-            # Store incidental and true evidence for actions
+            # Store spurious and causal evidence for actions
             comp_action_evidence_incidental.append(target_predictions[:, 0])
             comp_action_evidence_true.append(target_predictions[:, 1])
 
@@ -514,7 +510,6 @@ def get_trial_wise_target_predictions_test(
             all_actions.append(action)
             options_comb_str = get_numeric(test_df.iloc[t]['options_comb'])
             target_str = get_numeric(test_df.iloc[t]['target'])
-            #target_str = ''.join([target_str[i] for i in successor_feature_recoding])
             trials.append(options_comb_str + '-' + target_str)
         
     # Add trial-wise target predictions
@@ -552,7 +547,7 @@ def fit_transition_influence_model(
     ):
     """
     Fit a Bayesian multinomial logistic regression model to predict
-    actions based on previous observations of true and incidental
+    actions based on previous observations of causal and spurious
     transitions from the composition to the target
 
     Arguments
@@ -722,11 +717,11 @@ def update_paths(data_path, results_path, group_label):
         Updated results path with group label
     """
     if group_label:
-        data_path = f'{DATA_PATH}/{group_label}'
-        results_path = f'{RESULTS_PATH}/{group_label}'
+        data_path = f'{data_path}/{group_label}'
+        results_path = f'{results_path}/{group_label}'
     else:
-        data_path = DATA_PATH
-        results_path = RESULTS_PATH
+        data_path = data_path
+        results_path = results_path
     return data_path, results_path
 
 def create_results_directories(
@@ -803,7 +798,10 @@ def id_from_fname(fname):
     agent_id : str
         Agent ID
     """
-    fname_id = fname.split('.')[0].split('_')[1]
+    if 'sub' in fname:
+        fname_id = fname.split('.')[0].split('_')[0]
+    else:
+        fname_id = fname.split('.')[0].split('_')[1]
     if '-' in fname_id:
         fname_id = fname_id.split('-')[1]
     return fname_id
@@ -868,7 +866,9 @@ def get_files_to_analyse(
 def compute_transition_predictions(
         training_path = None,
         test_path = False,
-        results_path = ''
+        results_path = '',
+        instance_tmat = None,
+        feature_tmat = None
     ):
     """
     Compute transition predictions for a given training and test set
@@ -881,6 +881,11 @@ def compute_transition_predictions(
         Path to test data. If False, test analysis is not run
     results_path : str
         Path to parent results directory
+    instance_tmat : numpy.Array
+        Transition matrix for instance values
+    feature_tmat : dict
+        Dictionary of transition matrices for features, with keys for 
+        each condition 
     
     Returns
     -------
@@ -893,21 +898,19 @@ def compute_transition_predictions(
     # Get number of environment features
     target_comb = training_df['target_comb'].values[0]
     target_comb = convert_str_to_array(target_comb)
-
-    # Get between-feature transition matrix
-    ###### UPDATE THIS TO BE FLEXIBLE WITH MRI CONDITIONS
-    #feature_tmat = np.eye(n_feats, dtype=int)
-    if 'between_cond' in training_df.columns:
+    
+    # Get condition-based transition matrix
+    if 'condition' in training_df.columns:
+        condition = training_df['condition'].values[0]
+    elif 'between_cond' in training_df.columns:
         condition = training_df['between_cond'].values[0]
-        successor_feature_recoding = SUCCESSOR_FEATURE_RECODING[condition]
-    #    if training_df['between_cond'].values[0]:
-    #        feature_tmat = feature_tmat[FEATURE_RECODING_INDEX]
             
     # Get training trial-wise target predictions and phase-wise
     # transition proportions
     transitions_df, transition_props = get_trial_wise_target_predictions(
         training_df,
-        successor_feature_recoding
+        instance_tmat,
+        feature_tmat[condition]
     )
 
     # Save the training transition predictions
@@ -928,7 +931,8 @@ def compute_transition_predictions(
         test_transitions_df = get_trial_wise_target_predictions_test(
             test_df,
             transition_props,
-            successor_feature_recoding
+            instance_tmat,
+            feature_tmat[condition]
         )
 
         # Save the test transition predictions
@@ -1053,31 +1057,46 @@ def main():
     ###################################################################
     ###  Get command lind arguments ###################################
     ###################################################################
-
-    parser = argparse.ArgumentParser()
+    
+    # Set up the argument parser
+    parser = argparse.ArgumentParser(
+        description = 'Specify which experiment to analyse.'
+        )
     parser.add_argument(
-        'model_type',
+        'experiment_label',
         type = str,
-        help = 'Fit model per trial ("trial") or per agent ("agent").'
+        help = "Specify the file name for the config to import."
     )
-    model_type = parser.parse_args().model_type
+    experiment_label = parser.parse_args().experiment_label
+    
+    # Import the experiment configuration
+    analysis_config = import_config(experiment_label)
 
-    # Cannot run test analysis for trial-wise models
-    #if model_type == 'trial':
-    #    RUN_TEST_ANALYSIS = False
+    base_data_path = analysis_config['data_path']
+    base_results_path = analysis_config['results_path']
+    model_type = analysis_config['model_type']
+    group_labels = analysis_config['group_labels']
+    n_cores = analysis_config['n_cores']
+    instance_tmat = analysis_config['instance_tmat']
+    feature_tmat = analysis_config['feature_tmat']
+    save_residuals = analysis_config['save_residuals']
+    run_test_analysis = analysis_config['run_test_analysis']
+    overwrite = analysis_config['overwrite']
+
+
 
     ###################################################################
     ###  Setup configurations for analyses ############################
     ###################################################################
 
     # Get number of workers and cores for pymc
-    n_workers, n_cores_pymc = get_worker_assignments(N_CORES)
+    n_workers, n_cores_pymc = get_worker_assignments(n_cores)
 
     # Get subgroup labels
-    if not GROUP_LABELS:
-        group_labels = get_group_labels(DATA_PATH)
+    if not group_labels:
+        group_labels = get_group_labels(base_data_path)
     else:
-        group_labels = GROUP_LABELS
+        group_labels = group_labels
 
     # Account for projects with no group labels
     if not group_labels:
@@ -1086,14 +1105,14 @@ def main():
     # Init lists to store transition prediction configurations
     trans_pred_configs = []
     trialwise_trans_pred_configs = []
-    
+
     # Run analyses seperately for each group
     for group_label in group_labels:
 
         # Update data and results paths with group label
         data_path, results_path = update_paths(
-            DATA_PATH,
-            RESULTS_PATH,
+            base_data_path,
+            base_results_path,
             group_label
         )
 
@@ -1101,24 +1120,24 @@ def main():
         create_results_directories(
             results_path,
             model_type,
-            save_residuals = SAVE_RESIDUALS,
-            run_test_analysis = RUN_TEST_ANALYSIS
+            save_residuals = save_residuals,
+            run_test_analysis = run_test_analysis
         )
 
         # Get training files to generate transition predictions for
-        if RUN_TEST_ANALYSIS:
+        if run_test_analysis:
             phase = 'test'
         else:
             phase = 'training'
         fnames = get_files_to_analyse(
             f'{data_path}/{phase}',
             f'{results_path}/transition-predictions/{phase}/agent',
-            overwrite = OVERWRITE
+            overwrite = overwrite
         )
 
         # Format agent-wise transition prediction configurations
         for fname in fnames:
-            if RUN_TEST_ANALYSIS:
+            if run_test_analysis:
                 training_fname = fname.replace('test', 'training')
                 training_path = f'{data_path}/training/{training_fname}'
                 test_path = f'{data_path}/test/{fname}'
@@ -1128,7 +1147,9 @@ def main():
             trans_pred_configs.append({
                 'training_path': training_path,
                 'test_path': test_path,
-                'results_path': results_path
+                'results_path': results_path,
+                'instance_tmat': instance_tmat,
+                'feature_tmat': feature_tmat
             })
 
         # Format trial-wise transition prediction configurations
@@ -1144,14 +1165,17 @@ def main():
     print('Computing transition predictions...')
 
     # Parellelize transition prediction computations
-    with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-        [
+    with ProcessPoolExecutor(max_workers=n_cores) as executor:
+        futures = [
             executor.submit(
                 compute_transition_predictions,
                 **trans_pred_config
             )
             for trans_pred_config in trans_pred_configs
         ]
+
+        for future in futures:
+            future.result()
 
 
     ###################################################################
@@ -1162,14 +1186,17 @@ def main():
         print('Formatting trial-wise transition predictions...')
 
         # Parellelize re-formatting of transition predictions
-        with ProcessPoolExecutor(max_workers=N_CORES) as executor:
-            [
+        with ProcessPoolExecutor(max_workers=n_cores) as executor:
+            futures = [
                 executor.submit(
                     save_trial_wise_transition_predictions,
                     results_path
                 )
                 for results_path in trialwise_trans_pred_configs
             ]
+
+            for future in futures:
+                future.result()
 
 
     ###################################################################
@@ -1180,7 +1207,7 @@ def main():
     model_fit_configs = []
 
     # Get phases to run analyses for
-    if RUN_TEST_ANALYSIS:
+    if run_test_analysis:
         phases = ['training', 'test']
         phases = ['test']
     else:
@@ -1190,7 +1217,11 @@ def main():
     for group_label in group_labels:
 
         # Update data and results paths with group label
-        results_path = update_paths(DATA_PATH, RESULTS_PATH, group_label)[1]
+        results_path = update_paths(
+            base_data_path,
+            base_results_path,
+            group_label
+            )[1]
 
         for phase in phases:
 
@@ -1198,7 +1229,7 @@ def main():
             fnames = get_files_to_analyse(
                 f'{results_path}/transition-predictions/{phase}/{model_type}',
                 f'{results_path}/transition-influence/{phase}/{model_type}',
-                overwrite = OVERWRITE
+                overwrite = overwrite
             )
             for fname in fnames:
 
@@ -1207,7 +1238,7 @@ def main():
                 output_fname = output_fname.replace('.csv', '.pkl')
 
                 # Residuals path
-                if SAVE_RESIDUALS:
+                if save_residuals:
                     residuals_fname = fname.replace('predictions', 'influence-residuals')
                     residuals_path = f'{results_path}/transition-influence-residuals/{phase}/{model_type}/{residuals_fname}'
                 else:
