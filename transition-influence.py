@@ -427,6 +427,7 @@ def get_trial_wise_target_predictions_test(
     comp_action_evidence_true = []
     all_actions = []
     trials = []
+    all_n_steps = []
     for t in range(len(test_df)):
         
         # Skip trials with no valid response
@@ -511,6 +512,7 @@ def get_trial_wise_target_predictions_test(
             options_comb_str = get_numeric(test_df.iloc[t]['options_comb'])
             target_str = get_numeric(test_df.iloc[t]['target'])
             trials.append(options_comb_str + '-' + target_str)
+            all_n_steps.append(n_steps)
         
     # Add trial-wise target predictions
     comp_action_evidence_incidental = np.array(comp_action_evidence_incidental)
@@ -521,6 +523,7 @@ def get_trial_wise_target_predictions_test(
         'id': test_df['id'].iloc[0],
         'trial': trials,
         'action': all_actions,
+        'n_steps': all_n_steps
     })
     if 'between_cond' in test_df.columns:
         predictions_df['between_cond'] = test_df['between_cond'].iloc[0]
@@ -936,10 +939,21 @@ def compute_transition_predictions(
         )
 
         # Save the test transition predictions
-        test_transitions_df.to_csv(
-            f'{results_path}/transition-predictions/test/agent/{output_fname}',
-            index = False
-        )
+        if 'n_steps' in test_transitions_df.columns: # by n_steps
+            n_steps_levels = np.unique(test_transitions_df['n_steps'])
+            for n_steps in n_steps_levels:
+                idx = test_transitions_df['n_steps'] == n_steps
+                if len(n_steps_levels) > 1:
+                    fname = output_fname.replace('.csv', f'_n-steps-{n_steps}.csv')
+                test_transitions_df[idx].to_csv(
+                    f'{results_path}/transition-predictions/test/agent/{fname}',
+                    index = False
+                )
+        else:
+            test_transitions_df.to_csv(
+                f'{results_path}/transition-predictions/test/agent/{output_fname}',
+                index = False
+            )
 
 def save_trial_wise_transition_predictions(results_path):
     """
@@ -1209,7 +1223,6 @@ def main():
     # Get phases to run analyses for
     if run_test_analysis:
         phases = ['training', 'test']
-        phases = ['test']
     else:
         phases = ['training']
 
