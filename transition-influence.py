@@ -203,15 +203,38 @@ def recode_for_task_based_features(conj, feature_tmat):
     conj = inst*feature_tmat[feat]
     return conj
 
-def get_successor(state, feature_tmat, instance_tmat, n_steps=1):
-    for _ in range(n_steps):
+def get_successor(state, feature_tmat, instance_tmat, start_step, n_steps=1):
+    """
+    Get successor state.
+
+    Arguments
+    ---------
+    state : numpy.Array
+        State array to get successor of
+    feature_tmat : numpy.Array
+        Feature transition matrix. Should be 3D with dimensions 
+        [step, feature, successor_feature]
+    instance_tmat : numpy.Array
+        Instance transition matrix. Should be 2D with dimensions
+        [instance, successor_instance]
+    start_step : int
+        Step to start from in feature transition matrix
+    n_steps : int
+        Number of steps to get successor over
+
+    Returns
+    -------
+    succ : numpy.Array
+        Successor state array
+    """
+    for step in range(n_steps):
         succ = np.zeros_like(state, dtype=int)
         for feat in range(len(state)):
             if state[feat] != 0:
                 inst = state[feat] - 1
                 feat_new = np.random.choice(
-                    np.arange(len(feature_tmat)),
-                    p = feature_tmat[feat]
+                    np.arange(len(feature_tmat[0])),
+                    p = feature_tmat[start_step + step - 1][feat]
                     )
                 succ[feat_new] = np.random.choice(
                     np.arange(len(instance_tmat)) + 1,
@@ -305,8 +328,9 @@ def get_trial_wise_target_predictions(
                     # Is this a causal or spurious transition?
                     act_f_succ = get_successor(
                         act_f,
-                        feature_tmat[step - 1],
-                        instance_tmat
+                        feature_tmat,
+                        instance_tmat,
+                        step
                         )
                     is_causal = int(np.all(act_f_succ == target_f))
 
@@ -471,8 +495,9 @@ def get_trial_wise_target_predictions_test(
                     if n_steps > 1:
                         act_f = get_successor(
                             act_f,
-                            feature_tmat[step - 1],
+                            feature_tmat,
                             instance_tmat,
+                            step,
                             n_steps = n_steps - 1
                             )
 
@@ -487,8 +512,9 @@ def get_trial_wise_target_predictions_test(
                     # Is this a causal or spurious transition?
                     act_f_succ = get_successor(
                         act_f,
-                        feature_tmat[step - 1],
-                        instance_tmat
+                        feature_tmat,
+                        instance_tmat,
+                        step
                         )
                     is_causal = int(np.all(act_f_succ == target_f))
                     pred[is_causal] += transition_props[act_f_key][target_f_key]
