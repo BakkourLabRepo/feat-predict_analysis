@@ -789,7 +789,7 @@ def create_results_directories(
     if not run_test_analysis and (model_type == 'trial'):
         phase = 'training'
         model_labels = ['trial']
-    if run_test_analysis and (model_type == 'agent'):
+    elif run_test_analysis and (model_type == 'agent'):
         phase = 'test'
         model_labels = ['agent']
     elif run_test_analysis and (model_type == 'trial'):
