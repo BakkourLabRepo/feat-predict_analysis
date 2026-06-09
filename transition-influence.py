@@ -701,7 +701,7 @@ def fit_transition_influence_model(
     return trace, residuals
 
 
-def get_group_labels(data_path):
+def get_group_labels(data_path, bids=False):
     """
     Get group labels if data subgroups exist for the project
 
@@ -709,12 +709,17 @@ def get_group_labels(data_path):
     ---------
     data_path : str
         Path to data directory
+    bids : bool
+        Whether the data is in BIDS format (will not have nested
+        groups)
     
     Returns
     -------
     group_labels : list
         List of group labels
     """
+    if bids:
+        return []
     group_labels = [
         group_label
         for group_label in listdir(data_path)
@@ -854,7 +859,8 @@ def all_ids_from_fnames(dpath):
 def get_files_to_analyse(
         input_path,
         output_path,
-        overwrite = False
+        overwrite = False,
+        bids = False
     ):
     """
     Get files to analyse based on whether results already exist
@@ -874,21 +880,29 @@ def get_files_to_analyse(
         File names for files to analyse
     """
 
-    if overwrite:
-        return listdir(input_path)
-
     # Get agent IDs for input data and existing results
     data_ids = all_ids_from_fnames(input_path)
     results_ids = all_ids_from_fnames(output_path)
 
     # Get IDs not yet analysed
-    ids_to_run = list(set(data_ids).difference(set(results_ids)))
+    if overwrite:
+        ids_to_run = data_ids
+    else:
+        ids_to_run = list(set(data_ids).difference(set(results_ids)))
 
     # Select files to analyse
-    fnames = [
-        f for f in listdir(input_path)
-        if (id_from_fname(f) in ids_to_run) and f[0] != '.'
-    ]
+    fnames = []
+    for f in listdir(input_path):
+        if f[0] == '.':
+            continue
+        elif id_from_fname(f) in ids_to_run:
+            if bids:
+                fnames.append([
+                    sub_f for sub_f in listdir(f'{input_path}/{f}')
+                    if '.csv' in sub_f
+                ])
+            else:
+                fnames.append(f)
 
     return fnames
 
@@ -904,8 +918,9 @@ def compute_transition_predictions(
 
     Arguments
     ---------
-    training_path : str
-        Path to training data
+    training_path : str or list
+        Path to training data, or list of paths to training data if
+        data is split across multiple files
     test_path : str
         Path to test data. If False, test analysis is not run
     results_path : str
@@ -922,7 +937,15 @@ def compute_transition_predictions(
     """
 
     # Load training data
-    training_df = pd.read_csv(training_path)
+    if type(training_path) == list:
+        training_df = pd.concat([pd.read_csv(f) for f in training_path])
+        training_df = training_df.reset_index(drop=True)
+        training_df['t'] += np.max(training_df['t'])*(training_df['run'] - 1)
+        training_df = training_df.sort_values(by='t')
+        agent_id = id_from_fname(training_path[0].split('/')[-1])
+    else:
+        training_df = pd.read_csv(training_path)
+        agent_id = id_from_fname(training_path.split('/')[-1])
 
     # Get number of environment features
     target_comb = training_df['target_comb'].values[0]
@@ -943,7 +966,6 @@ def compute_transition_predictions(
     )
 
     # Save the training transition predictions
-    agent_id = id_from_fname(training_path.split('/')[-1])
     output_fname = f'transition-predictions_agent-{agent_id}.csv'
     transitions_df.to_csv(
         f'{results_path}/transition-predictions/training/agent/{output_fname}',
@@ -954,7 +976,13 @@ def compute_transition_predictions(
     if test_path:
 
         # Load test data
-        test_df = pd.read_csv(test_path)
+        if type(test_path) == list:
+            test_df = pd.concat([pd.read_csv(fname) for fname in test_path])
+            test_df = test_df.reset_index(drop=True)
+            test_df['t'] += np.max(test_df['t'])*(test_df['run'] - 1)
+            test_df = test_df.sort_values(by='t')
+        else:
+            test_df = pd.read_csv(test_path)
 
         # Get test trial-wise target predictions
         test_transitions_df = get_trial_wise_target_predictions_test(
@@ -971,6 +999,8 @@ def compute_transition_predictions(
                 idx = test_transitions_df['n_steps'] == n_steps
                 if len(n_steps_levels) > 1:
                     fname = output_fname.replace('.csv', f'_n-steps-{n_steps}.csv')
+                else:
+                    fname = output_fname
                 test_transitions_df[idx].to_csv(
                     f'{results_path}/transition-predictions/test/agent/{fname}',
                     index = False
@@ -1122,6 +1152,7 @@ def main():
     save_residuals = analysis_config['save_residuals']
     run_test_analysis = analysis_config['run_test_analysis']
     overwrite = analysis_config['overwrite']
+    bids = analysis_config['bids']
 
 
 
@@ -1134,7 +1165,7 @@ def main():
 
     # Get subgroup labels
     if not group_labels:
-        group_labels = get_group_labels(base_data_path)
+        group_labels = get_group_labels(base_data_path, bids=bids)
     else:
         group_labels = group_labels
 
@@ -1169,21 +1200,52 @@ def main():
             phase = 'test'
         else:
             phase = 'training'
+        if bids:
+            input_path = data_path
+        else:
+            input_path = f'{data_path}/{phase}'
         fnames = get_files_to_analyse(
-            f'{data_path}/{phase}',
+            input_path,
             f'{results_path}/transition-predictions/{phase}/agent',
-            overwrite = overwrite
+            overwrite = overwrite,
+            bids = bids
         )
-
+        
         # Format agent-wise transition prediction configurations
         for fname in fnames:
-            if run_test_analysis:
-                training_fname = fname.replace('test', 'training')
-                training_path = f'{data_path}/training/{training_fname}'
-                test_path = f'{data_path}/test/{fname}'
+            
+            # For BIDS organized MRI data
+            if bids:
+                subject_id = id_from_fname(fname[0])
+
+                # Training runs
+                training_path = [
+                    f'{data_path}/sub-{subject_id}/{run_fname}'
+                    for run_fname in fname
+                    if 'training' in run_fname
+                ]
+            
+                 # Test runs
+                if run_test_analysis:
+                    test_path = [
+                        f'{data_path}/sub-{subject_id}/{run_fname}'
+                        for run_fname in fname
+                        if 'test' in run_fname
+                    ]
+                else:
+                    test_path = False
+            
+            # For non-BIDS organized data
             else:
-                training_path = f'{data_path}/training/{fname}'
-                test_path = False
+
+                if run_test_analysis:
+                    training_fname = fname.replace('test', 'training')
+                    training_path = f'{data_path}/training/{training_fname}'
+                    test_path = f'{data_path}/test/{fname}'
+                else:
+                    training_path = f'{data_path}/training/{fname}'
+                    test_path = False
+
             trans_pred_configs.append({
                 'training_path': training_path,
                 'test_path': test_path,
