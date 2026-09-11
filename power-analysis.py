@@ -8,6 +8,7 @@ az.rcParams['stats.ci_prob'] = .95
 from os import listdir
 import pickle
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 
 import logging
 logger = logging.getLogger('pymc')
@@ -190,6 +191,8 @@ def sample_from_fit_model(trans_influence_df):
         Dictionary of posterior draws for needed parameters.
     """
 
+    print('Fitting initial model for posterior draws...')
+
     # Fit the transition influence Bayesian regression model 
     model = bmb.Model(
         'coef ~ sem_congruent*transition + (1|action) + (1|id)',
@@ -294,108 +297,125 @@ def simulate_data(
 
     return df
 
+def run_one_simulation(args):
+    """
+    Run one power-analysis simulation.
+
+    Arguments
+    ----------
+    args : tuple
+        Tuple of arguments for the simulation.
+
+    Returns
+    -------
+    success : bool
+        True if the HDI for the interaction effect does not contain 0,
+        False otherwise.
+    """
+    (
+        i,
+        n_per_group,
+        posterior_draws,
+        hdi_prob,
+        shrink_factor,
+        draws,
+        tune
+    ) = args
+
+    rng = np.random.default_rng(i)
+
+    # Number of posterior draws available for sampling
+    n_draws_available = len(posterior_draws['b_interaction'])
+
+    # Draw parameter values from the posterior 
+    idx = rng.integers(0, n_draws_available)  
+    b0 = posterior_draws['b0'][idx]
+    b_congruent = posterior_draws['b_congruent'][idx]
+    b_transition = posterior_draws['b_transition'][idx]
+    id_sd = posterior_draws['id_sd'][idx]
+    action_sd = posterior_draws['action_sd'][idx]
+    sigma = posterior_draws['sigma'][idx]
+
+    # Draw the target interaction effect size, which can be 
+    # shrunk by a specified factor to simulate smaller effect sizes
+    b_interaction = posterior_draws['b_interaction'][idx]*shrink_factor
+
+    # Simulate data
+    df = simulate_data(
+        n_per_group,
+        b0,
+        b_congruent,
+        b_transition,
+        b_interaction,
+        action_sd,
+        id_sd,
+        sigma,
+        seed = i
+        )
+
+    # Fit the model to the simulated data
+    model = bmb.Model(
+        'coef ~ sem_congruent*transition + (1|action) + (1|id)',
+        df,
+        family = 'gaussian',
+        link = 'identity'
+    )
+
+    fit = model.fit(
+        draws = draws,
+        tune = tune,
+        chains = 2,
+        cores = 2,
+        progressbar = False
+    )
+
+     # Assess whether the HDI is greater than 0
+    hdi = az.hdi(
+        fit,
+        var_names = ['sem_congruent:transition'],
+        hdi_prob = hdi_prob
+    )['sem_congruent:transition'].values[0]
+    success = hdi[0] > 0
+
+    return success
 
 def run_power_sim_posterior(
         n_per_group,
         posterior_draws,
-        n_sims = 1000,
-        draws = 1000,
-        tune = 1000,
+        n_sims = 300,
+        draws = 500,
+        tune = 500,
         hdi_prob = 0.95,
         shrink_factor = 1.0,
-        rng_seed = 0
-        ):
-    """
-    Run a power analysis based on an existing model fit.
-
-    Arguments
-    ----------
-    n_per_group : int
-        Number of participants per semantic congruency condition.
-    posterior_draws : dict
-        Dictionary of posterior draws for parameters of interest.
-    n_sims : int
-        Number of simulations to compute power over.
-    draws : int
-        Number of draws for model fitting.
-    tune : int
-        Number of tuning steps for model fitting.
-    hdi_prob : float
-        HDI probability for assessing significance (deault is 0.95).
-    shrink_factor : float
-        Factor to shrink the interaction effect size by during simulation.
-    rng_seed : int
-        Random seed for reproducibility.
-
-    Returns
-    -------
-    power : float
-        Power, estimated as the proportion of simulations where the HDI
-        for the interaction effect does not contain 0.
-    """
-    print(
-        f'Running for n_per_group = {n_per_group}'
-        f', shrink_factor = {shrink_factor}...'
-        )
+        rng_seed = 0,
+        n_workers = 2
+    ):
     rng = np.random.default_rng(rng_seed)
+    print(
+        f'Running for n_per_group = {n_per_group}, '
+        f'shrink_factor = {shrink_factor}...'
+    )
 
-    # Get the number of available posterior draws that parameters
-    # can be sampled from for simulation
-    n_draws_available = len(posterior_draws['b_interaction'])
-    
-    successes = 0 # HDI does mot contain 0
-    for i in range(n_sims):
-
-        # Draw parameter values from the posterior 
-        idx = rng.integers(0, n_draws_available)  
-        b0 = posterior_draws['b0'][idx]
-        b_congruent = posterior_draws['b_congruent'][idx]
-        b_transition = posterior_draws['b_transition'][idx]
-        id_sd = posterior_draws['id_sd'][idx]
-        action_sd = posterior_draws['action_sd'][idx]
-        sigma = posterior_draws['sigma'][idx]
-
-        # Draw the target interaction effect size, which can be 
-        # shrunk by a specified factor to simulate smaller effect sizes
-        b_interaction = posterior_draws['b_interaction'][idx]*shrink_factor
-
-        # Simulate data
-        df = simulate_data(
+    # Create arguments for each simulation
+    args = [
+        (
+            i,
             n_per_group,
-            b0,
-            b_congruent,
-            b_transition,
-            b_interaction,
-            action_sd,
-            id_sd,
-            sigma,
-            seed = i
-            )
+            posterior_draws,
+            hdi_prob,
+            shrink_factor,
+            draws,
+            tune
+        )
+        for i in range(n_sims)
+    ]
 
-        # Fit the model to the simulated data
-        model = bmb.Model(
-            'coef ~ sem_congruent*transition + (1|action) + (1|id)',
-            df,
-            family = 'gaussian',
-            link = 'identity')
-        fit = model.fit(
-            draws = draws,
-            tune = tune,
-            chains = 2,
-            progressbar = False
-            )
+    # Run simulations in parallel
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        successes = list(executor.map(run_one_simulation, args))
 
-        # Assess whether the HDI is greater than 0
-        hdi = az.hdi(
-            fit,
-            var_names = ['sem_congruent:transition'],
-            hdi_prob = hdi_prob
-            )['sem_congruent:transition'].values[0]
-        if hdi[0] > 0:
-            successes += 1
-
-    # Power is the success rate
-    power = successes/n_sims
+    # Power is the proportion of simulations where HDI > 0
+    power = sum(successes)/n_sims
 
     print(f'    Finished: Power = {power:.2f}')
 
@@ -444,9 +464,10 @@ def power_analysis(
         fig_path,
         n_per_group_levels = [50],
         shrink_factor_levels = [1.0],
-        n_sims = 200,
+        n_sims = 300,
         draws = 500,
         tune = 500,
+        n_workers = 2
         ):
     """
     Perform a power analysis for a given set of parameters.
@@ -469,6 +490,8 @@ def power_analysis(
         Number of draws for model fitting.
     tune : int
         Number of tuning steps for model fitting.
+    n_workers : int
+        Number of workers to parallelize simulations over.
     """
 
     # Generate poster draws
@@ -488,7 +511,8 @@ def power_analysis(
                 n_sims = n_sims,
                 draws = draws,
                 tune = tune,
-                shrink_factor = shrink_factor
+                shrink_factor = shrink_factor,
+                n_workers = n_workers
                 )
             results.append([2*n_per_group, shrink_factor, power])
 

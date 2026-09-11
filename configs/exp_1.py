@@ -72,9 +72,10 @@ analysis_config = {
     'power_analysis_config': {
         'n_per_group_levels': [50, 60, 70, 80, 90, 100],
         'shrink_factor_levels': [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
-        'n_sims': 300,
-        'draws': 500,
-        'tune': 500
+        'n_sims': 50,
+        'draws': 250,
+        'tune': 250,
+        'n_workers': 2
     }
 
 }
