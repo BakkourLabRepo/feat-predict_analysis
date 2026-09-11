@@ -6,7 +6,7 @@ import bambi as bmb
 import arviz as az
 az.rcParams['stats.ci_prob'] = .95
 from os import listdir, makedirs, getpid, environ
-import pytensor
+from pathlib import Path
 import pickle
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -316,13 +316,6 @@ def run_one_simulation(args):
         draws,
         tune
     ) = args
-
-    # Unique PyTensor compilation directory for this process
-    worker_id = getpid()
-    compiledir = f'{environ.get("TMPDIR", "/tmp")}/pytensor_{worker_id}'
-    makedirs(compiledir, exist_ok=True)
-    pytensor.config.base_compiledir = compiledir
-
     rng = np.random.default_rng(i)
 
     # Number of posterior draws available for sampling
@@ -381,6 +374,16 @@ def run_one_simulation(args):
 
     return success
 
+def init_worker():
+    """Set up an isolated PyTensor compilation directory for this worker."""
+
+    worker_id = getpid()
+
+    compiledir = Path(f'{environ.get("TMPDIR", "/tmp")}/pytensor_{worker_id}')
+    compiledir.mkdir(parents=True, exist_ok=True)
+
+    environ['PYTENSOR_FLAGS'] = f'base_compiledir={compiledir}'
+
 def run_power_sim_posterior(
         n_per_group,
         posterior_draws,
@@ -412,7 +415,10 @@ def run_power_sim_posterior(
     ]
 
     # Run simulations in parallel
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with ProcessPoolExecutor(
+        max_workers = n_workers,
+        initializer = init_worker
+        ) as executor:
         successes = list(executor.map(run_one_simulation, args))
 
     # Power is the proportion of simulations where HDI > 0
