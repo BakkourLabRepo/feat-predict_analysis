@@ -1,5 +1,5 @@
 .DS_Store
-*.sbath
+*.sbatch
 logs
 
 # Byte-compiled / optimized / DLL files
