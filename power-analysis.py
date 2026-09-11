@@ -5,7 +5,7 @@ import seaborn as sns
 import bambi as bmb
 import arviz as az
 az.rcParams['stats.ci_prob'] = .95
-from os import listdir
+from os import listdir, makedirs
 import pickle
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -16,20 +16,6 @@ logger.setLevel(logging.ERROR)
 pd.options.mode.chained_assignment = None  
 
 from src.utils import import_config
-
-#######################################################################
-### Configs ###########################################################
-#######################################################################
-
-DATA_PATH = '../data'
-RESULTS_PATH = '../results'
-FIG_PATH = '../figs'
-
-# Subjects to exclude based on preregistered criterion
-IDS_TO_EXCLUDE = [
-    929094, 297827, 835395, 123289, 941076, 786858, 209368, 385852,
-    988204, 586980
-    ]
 
 
 #######################################################################
@@ -68,7 +54,7 @@ def info_from_fname(fname, field):
     field_value = fname_info[field]
     return field_value
 
-def load_subjects_condition(data_path):
+def load_subjects_condition(data_path, ids_to_exclude=[]):
     """
     Load subject-condition assignments.
 
@@ -76,6 +62,8 @@ def load_subjects_condition(data_path):
     ---------
     data_path : str
         Path to data directory
+    ids_to_exclude : list
+        List of subject IDs to exclude from analysis
 
     Returns
     -------
@@ -87,7 +75,7 @@ def load_subjects_condition(data_path):
     training_df = load_from_dir(f'{data_path}/training', na_values='null')
 
     # Exclude participants
-    idx = np.isin(training_df['id'], IDS_TO_EXCLUDE, invert=True)
+    idx = np.isin(training_df['id'], ids_to_exclude, invert=True)
     training_df = training_df.loc[idx]
     training_df = training_df.reset_index(drop=True)
 
@@ -99,7 +87,7 @@ def load_subjects_condition(data_path):
 
     return subj_df
 
-def load_transition_influence(results_path, data_path):
+def load_transition_influence(results_path, data_path, ids_to_exclude=[]):
     """
     Load fit transition influence coefficients.
 
@@ -109,6 +97,8 @@ def load_transition_influence(results_path, data_path):
         Path to results directory
     data_path : str
         Path to data directory
+    ids_to_exclude : list
+        List of subject IDs to exclude from analysis
 
     Returns
     -------
@@ -162,7 +152,7 @@ def load_transition_influence(results_path, data_path):
     )
 
     # Add condition information
-    subj_df = load_subjects_condition(data_path)
+    subj_df = load_subjects_condition(data_path, ids_to_exclude=ids_to_exclude)
     trans_influence_df = pd.merge(
         trans_influence_df,
         subj_df,
@@ -466,6 +456,7 @@ def power_analysis(
         results_path,
         data_path,
         fig_path,
+        ids_to_exclude = [],
         n_per_group_levels = [50],
         shrink_factor_levels = [1.0],
         n_sims = 300,
@@ -484,6 +475,8 @@ def power_analysis(
         Path to data directory.
     fig_path : str
         Path to figures directory.
+    ids_to_exclude : list
+        List of subject IDs to exclude from analysis.
     n_per_group_levels : list of int
         List of sample sizes per group to test.
     shrink_factor_levels : list of float
@@ -501,7 +494,8 @@ def power_analysis(
     # Generate poster draws
     trans_influence_df = load_transition_influence(
         f'{results_path}/transition-influence',
-        data_path
+        data_path,
+        ids_to_exclude = ids_to_exclude
         )
     posterior_draws = sample_from_fit_model(trans_influence_df)
 
@@ -528,6 +522,7 @@ def power_analysis(
     results.to_csv(f'{results_path}/power-analysis.csv', index=False)
 
     # Plot
+    makedirs(fig_path, exist_ok=True)
     plot_results(results, fname=f'{fig_path}/power-analysis.svg')
 
 
@@ -556,6 +551,7 @@ def main():
         analysis_config['results_path'],
         analysis_config['data_path'],
         analysis_config['fig_path'],
+        ids_to_exclude = analysis_config['ids_to_exclude'],
         **analysis_config['power_analysis_config']
         )
 
