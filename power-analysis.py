@@ -5,7 +5,8 @@ import seaborn as sns
 import bambi as bmb
 import arviz as az
 az.rcParams['stats.ci_prob'] = .95
-from os import listdir, makedirs
+from os import listdir, makedirs, getpid, environ
+import pytensor
 import pickle
 import argparse
 from concurrent.futures import ProcessPoolExecutor
@@ -315,6 +316,12 @@ def run_one_simulation(args):
         draws,
         tune
     ) = args
+
+    # Unique PyTensor compilation directory for this process
+    worker_id = getpid()
+    compiledir = f'{environ.get("TMPDIR", "/tmp")}/pytensor_{worker_id}'
+    makedirs(compiledir, exist_ok=True)
+    pytensor.config.base_compiledir = compiledir
 
     rng = np.random.default_rng(i)
 
