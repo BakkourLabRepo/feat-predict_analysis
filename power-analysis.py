@@ -206,7 +206,7 @@ def sample_from_fit_model(trans_influence_df):
         draws = 2000,
         target_accept = .95
     )
-    az.summary(fit)
+    print(az.summary(fit))
 
     # Get posterior draws for parameters of interest for data simulation
     posterior = fit.posterior
@@ -292,7 +292,11 @@ def simulate_data(
         rows,
         columns = ['id', 'sem_congruent', 'transition', 'action', 'coef']
         )
-    df['transition'] = df['transition'].map({0: 'spurious', 1: 'causal'})
+    df['transition'] = pd.Categorical(
+            df['transition'].map({0: 'spurious', 1: 'causal'}),
+            categories = ['spurious', 'causal'],
+            ordered = True
+        )
     df['action'] = df['action'].astype(str)
 
     return df
@@ -366,7 +370,8 @@ def run_one_simulation(args):
         tune = tune,
         chains = 2,
         cores = 2,
-        progressbar = False
+        progressbar = False,
+        random_seed = i
     )
 
      # Assess whether the HDI is greater than 0
@@ -390,7 +395,6 @@ def run_power_sim_posterior(
         rng_seed = 0,
         n_workers = 2
     ):
-    rng = np.random.default_rng(rng_seed)
     print(
         f'Running for n_per_group = {n_per_group}, '
         f'shrink_factor = {shrink_factor}...'
