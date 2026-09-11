@@ -1,10 +1,7 @@
 
 import numpy as np
 
-PROJECT_PATH = (
-    '/Users/euanprentis/Library/CloudStorage/Box-Box/Bakkour-Lab'
-    '/projects/feat-predict/human/exp_1'
-    )
+PROJECT_PATH = '../../data/human/exp_1/'
 
 analysis_config = {
 
@@ -12,6 +9,12 @@ analysis_config = {
     'data_path': f'{PROJECT_PATH}/data',
     'results_path': f'{PROJECT_PATH}/results',
     'fig_path': f'{PROJECT_PATH}/figs',
+
+    # Subjects to exclude based on preregistered criterion
+    'ids_to_exclude': [
+        929094, 297827, 835395, 123289, 941076, 786858, 209368, 385852,
+        988204, 586980
+        ],
 
     'instance_tmat': np.array([
             [1,0,0,0],
@@ -72,10 +75,10 @@ analysis_config = {
     'power_analysis_config': {
         'n_per_group_levels': [50, 60, 70, 80, 90, 100],
         'shrink_factor_levels': [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
-        'n_sims': 50,
-        'draws': 250,
-        'tune': 250,
-        'n_workers': 2
+        'n_sims': 250,
+        'draws': 500,
+        'tune': 500,
+        'n_workers': 20
     }
 
 }
