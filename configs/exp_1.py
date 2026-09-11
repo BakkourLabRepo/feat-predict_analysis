@@ -1,11 +1,17 @@
 
 import numpy as np
 
+PROJECT_PATH = (
+    '/Users/euanprentis/Library/CloudStorage/Box-Box/Bakkour-Lab'
+    '/projects/feat-predict/human/exp_1'
+    )
+
 analysis_config = {
 
     # Data and results paths
-    'data_path': '/Users/euanprentis/Library/CloudStorage/Box-Box/Bakkour-Lab/projects/feat-predict/human/exp_1/data',
-    'results_path': '/Users/euanprentis/Library/CloudStorage/Box-Box/Bakkour-Lab/projects/feat-predict/human/exp_1/results_2',
+    'data_path': f'{PROJECT_PATH}/data',
+    'results_path': f'{PROJECT_PATH}/results',
+    'fig_path': f'{PROJECT_PATH}/figs',
 
     'instance_tmat': np.array([
             [1,0,0,0],
@@ -60,6 +66,15 @@ analysis_config = {
     'group_labels': [],
 
     # Number of Bambi cores to use
-    'n_cores': 4
+    'n_cores': 4,
+
+    # Arguments for power analysis
+    'power_analysis_config': {
+        'n_per_group_levels': [50, 60, 70, 80, 90, 100],
+        'shrink_factor_levels': [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
+        'n_sims': 300,
+        'draws': 500,
+        'tune': 500
+    }
 
 }
