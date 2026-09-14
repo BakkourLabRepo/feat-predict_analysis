@@ -1,7 +1,7 @@
 
 import numpy as np
 
-PROJECT_PATH = '../../data/human/exp_1/'
+PROJECT_PATH = '/Users/euanprentis/Library/CloudStorage/Box-Box/Bakkour-Lab/projects/feat-predict/human/exp_1'
 
 analysis_config = {
 
@@ -73,12 +73,12 @@ analysis_config = {
 
     # Arguments for power analysis
     'power_analysis_config': {
-        'n_per_group_levels': [50, 60, 70, 80, 90, 100],
-        'shrink_factor_levels': [1.0, 0.9, 0.8, 0.7, 0.6, 0.5],
-        'n_sims': 250,
+        'n_per_group_levels': [50, 60, 70, 80],
+        'shrink_factor_levels': [1.0, 0.75, 0.5],
+        'n_sims': 200,
         'draws': 500,
         'tune': 500,
-        'n_workers': 20
+        'n_workers': 2
     }
 
 }
