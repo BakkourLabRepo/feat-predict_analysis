@@ -71,6 +71,9 @@ analysis_config = {
     # Number of Bambi cores to use
     'n_cores': 4,
 
+    # Is data in BIDS format?
+    'bids': False,
+
     # Arguments for power analysis
     'power_analysis_config': {
         'n_per_group_levels': [50, 60, 70, 80],

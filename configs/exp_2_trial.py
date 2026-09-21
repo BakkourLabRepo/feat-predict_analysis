@@ -139,6 +139,9 @@ analysis_config = {
     'group_labels': [],
 
     # Number of Bambi cores to use
-    'n_cores': 4
+    'n_cores': 4,
+
+    # Is data in BIDS format?
+    'bids': False
 
 }
